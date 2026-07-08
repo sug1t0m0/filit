@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.filit/
+*.tsbuildinfo
+*.log
+.DS_Store
