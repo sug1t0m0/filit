@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { type Server } from 'node:http';
@@ -7,7 +6,10 @@ import { fileURLToPath } from 'node:url';
 
 import express, { type Express } from 'express';
 
+import { type BundleParams, decodeBundleParams } from '../utils/bundleCode.js';
+
 import { CommentStore, findStoreRoot } from './comment-store.js';
+import { gitInfo, gitShow } from './git.js';
 import { composeMarkdown } from './composer.js';
 import { scanFiles } from './file-scanner.js';
 
@@ -87,7 +89,8 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
     }
   });
 
-  const commentStore = new CommentStore(findStoreRoot(options.rootDir));
+  const storeRoot = findStoreRoot(options.rootDir);
+  const commentStore = new CommentStore(storeRoot);
   if (options.clearComments) {
     await commentStore.clear();
   }
@@ -185,7 +188,8 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
     req.on('close', () => {
       clearInterval(ping);
       heartbeatClients -= 1;
-      if (heartbeatClients <= 0) {
+      // In dev, closing the browser tab must not kill the whole `pnpm dev` session
+      if (heartbeatClients <= 0 && process.env.NODE_ENV !== 'development') {
         shutdownTimer = setTimeout(() => {
           console.log('All clients disconnected; shutting down.');
           process.exit(0);
@@ -194,78 +198,94 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
     });
   });
 
-  // Bundles live in memory only; they are one-shot pages handed to a browser tab
-  const bundles = new Map<string, string>();
-  const MAX_BUNDLES = 20;
+  // Bundles are persisted selections (.filit/bundles.json) with deterministic ids,
+  // resolved against the current file contents (or a pinned rev) and comments on every view.
+  // See docs/bundle-url-spec.md.
+  const resolveBundle = async (params: BundleParams) => {
+    if (params.files.some((file) => !knownFiles.has(file))) {
+      await rescan();
+    }
+    const inScope = params.files.filter((file) => knownFiles.has(file));
+    const missing = params.files.filter((file) => !knownFiles.has(file));
+    const contents: { path: string; content: string }[] = [];
+    for (const path of inScope) {
+      if (params.rev) {
+        const content = await gitShow(options.rootDir, params.rev, path);
+        if (content === null) {
+          missing.push(path);
+        } else {
+          contents.push({ path, content });
+        }
+      } else {
+        contents.push({ path, content: await readFile(join(options.rootDir, path), 'utf8') });
+      }
+    }
+    const presentSet = new Set(contents.map((file) => file.path));
+    const { comments } = await commentStore.load();
+    const bundleComments = comments.filter((comment) => presentSet.has(comment.file));
+    const { markdown, bytes } = composeMarkdown(contents, bundleComments);
+    return { files: contents, comments: bundleComments, markdown, bytes, missing };
+  };
 
-  app.post('/api/bundles', async (req, res) => {
-    const { files } = req.body as { files?: unknown };
-    if (
-      !Array.isArray(files) ||
-      files.length === 0 ||
-      !files.every((file): file is string => typeof file === 'string')
-    ) {
-      res.status(400).json({ error: 'files must be a non-empty array of paths' });
+  app.get('/api/git/head', async (_req, res) => {
+    res.json(await gitInfo(options.rootDir));
+  });
+
+  app.get('/api/bundles/:payload', async (req, res) => {
+    let params: BundleParams;
+    try {
+      params = decodeBundleParams(req.params.payload);
+    } catch (error) {
+      res
+        .status(400)
+        .json({ error: error instanceof Error ? error.message : 'invalid bundle URL' });
       return;
     }
     try {
-      if (files.some((file) => !knownFiles.has(file))) {
-        await rescan();
-      }
-      const missing = files.filter((file) => !knownFiles.has(file));
-      if (missing.length > 0) {
-        res.status(400).json({ error: `files not in scope: ${missing.join(', ')}` });
-        return;
-      }
-      const contents = await Promise.all(
-        files.map(async (path) => ({
-          path,
-          content: await readFile(join(options.rootDir, path), 'utf8'),
-        })),
-      );
-      const { comments } = await commentStore.load();
-      const { markdown, bytes } = composeMarkdown(contents, comments);
-
-      const id = randomUUID().slice(0, 8);
-      bundles.set(id, markdown);
-      if (bundles.size > MAX_BUNDLES) {
-        const oldest = bundles.keys().next().value;
-        if (oldest !== undefined) {
-          bundles.delete(oldest);
-        }
-      }
-      res.status(201).json({ id, bytes });
+      const resolved = await resolveBundle(params);
+      res.json({
+        id: req.params.payload,
+        rev: params.rev ?? null,
+        files: resolved.files,
+        comments: resolved.comments,
+        bytes: resolved.bytes,
+        missing: resolved.missing,
+      });
     } catch (error) {
-      res.status(500).json({ error: error instanceof Error ? error.message : 'compose failed' });
+      res.status(500).json({ error: error instanceof Error ? error.message : 'resolve failed' });
     }
   });
 
-  app.get('/bundle/:id', (req, res) => {
-    const markdown = bundles.get(req.params.id);
-    if (markdown === undefined) {
+  // Plain Markdown fallback for copy/paste or when the rich page confuses an LLM
+  app.get('/api/bundles/:payload/raw', async (req, res) => {
+    let params: BundleParams;
+    try {
+      params = decodeBundleParams(req.params.payload);
+    } catch (error) {
       res
-        .status(404)
+        .status(400)
         .type('text/plain')
-        .send('bundle not found (bundles do not survive a server restart)');
+        .send(error instanceof Error ? error.message : 'invalid bundle URL');
       return;
     }
-    const escaped = markdown
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;');
-    res
-      .type('html')
-      .send(
-        `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>filit bundle ${req.params.id}</title></head><body><pre>${escaped}</pre></body></html>`,
-      );
+    try {
+      const resolved = await resolveBundle(params);
+      res.type('text/markdown; charset=utf-8').send(resolved.markdown);
+    } catch (error) {
+      res
+        .status(500)
+        .type('text/plain')
+        .send(error instanceof Error ? error.message : 'resolve failed');
+    }
   });
 
   // In production the built client is served from dist/client (this file lives in dist/server)
   const clientDir = join(__dirname, '../client');
   if (process.env.NODE_ENV !== 'development' && existsSync(clientDir)) {
     app.use(express.static(clientDir));
+    // SPA fallback: /bundle/:id is a client-side route
     app.get('/{*splat}', (req, res, next) => {
-      if (req.path.startsWith('/api/') || req.path.startsWith('/bundle/')) {
+      if (req.path.startsWith('/api/')) {
         next();
         return;
       }

@@ -27,10 +27,6 @@ export default defineConfig({
         target: apiTarget,
         changeOrigin: true,
       },
-      '/bundle': {
-        target: apiTarget,
-        changeOrigin: true,
-      },
     },
   },
 });

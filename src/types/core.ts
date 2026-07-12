@@ -35,9 +35,27 @@ export interface TreeResponse {
   scope: string[];
 }
 
-export interface BundleResponse {
+export interface BundleFileSnapshot {
+  path: string;
+  content: string;
+}
+
+export interface BundleDetailResponse {
   id: string;
+  /** Pinned commit SHA, or null when the bundle shows the live working tree */
+  rev: string | null;
+  files: BundleFileSnapshot[];
+  comments: Comment[];
   bytes: number;
+  /** Bundled paths not resolvable (out of scope, deleted, or absent at the pinned rev) */
+  missing: string[];
+}
+
+export interface GitHeadResponse {
+  /** HEAD commit SHA, or null when not a git repo */
+  sha: string | null;
+  /** Paths (relative to the scope root) with uncommitted changes */
+  dirty: string[];
 }
 
 export interface FileContentResponse {

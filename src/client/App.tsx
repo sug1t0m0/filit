@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-import type { BundleResponse, FileNode } from '@/types/core.js';
+import type { FileNode, GitHeadResponse } from '@/types/core.js';
+import { encodeBundleParams, PAYLOAD_WARN_LENGTH } from '@/utils/bundleCode.js';
 import { utf8ByteLength } from '@/utils/byteCount.js';
 
 import { FileTree } from './components/FileTree.js';
-import { FileViewer } from './components/FileViewer.js';
+import { FileViewer, type ViewMode } from './components/FileViewer.js';
 import { Header } from './components/Header.js';
 import { useComments } from './hooks/useComments.js';
 import { useFileTree } from './hooks/useFileTree.js';
@@ -14,6 +15,7 @@ export function App() {
   const { comments, addComment, removeComment } = useComments();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>('single');
 
   // Keep the server alive while this tab is open (server exits when all tabs close)
   useEffect(() => {
@@ -82,34 +84,71 @@ export function App() {
     return paths;
   }, [tree]);
 
-  const [openError, setOpenError] = useState<string | null>(null);
+  // Checked files in tree display order; drives both the bundle and the selected view
+  const selectedPaths = useMemo(
+    () => orderedPaths.filter((path) => selected.has(path)),
+    [orderedPaths, selected],
+  );
 
-  const openTab = useCallback(async () => {
-    setOpenError(null);
-    try {
-      const files = orderedPaths.filter((path) => selected.has(path));
-      const res = await fetch('/api/bundles', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ files }),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(data?.error ?? `HTTP ${res.status}`);
+  const [openError, setOpenError] = useState<string | null>(null);
+  const [isGitRepo, setIsGitRepo] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/git/head')
+      .then((res) => res.json() as Promise<GitHeadResponse>)
+      .then((info) => setIsGitRepo(info.sha !== null))
+      .catch(() => setIsGitRepo(false));
+  }, []);
+
+  // The bundle URL is stateless: encode the selection (and optional rev) right here
+  const openTab = useCallback(
+    async (pinToHead: boolean) => {
+      setOpenError(null);
+      try {
+        let rev: string | undefined;
+        if (pinToHead) {
+          // Fetch on click so the SHA and dirty state are fresh
+          const res = await fetch('/api/git/head');
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const info = (await res.json()) as GitHeadResponse;
+          if (!info.sha) {
+            throw new Error('git リポジトリではないため HEAD 固定で開けません');
+          }
+          const dirtySelected = selectedPaths.filter((path) => info.dirty.includes(path));
+          if (
+            dirtySelected.length > 0 &&
+            !window.confirm(
+              `未コミット変更があるため、HEAD 固定の内容は現在の編集と異なります:\n${dirtySelected.join('\n')}\n\n続行しますか?`,
+            )
+          ) {
+            return;
+          }
+          rev = info.sha;
+        }
+        const payload = encodeBundleParams({ files: selectedPaths, ...(rev ? { rev } : {}) });
+        if (
+          payload.length > PAYLOAD_WARN_LENGTH &&
+          !window.confirm(
+            `URL が長くなっています (${payload.length} 字)。ブラウザによっては開けないことがあります。続行しますか?`,
+          )
+        ) {
+          return;
+        }
+        window.open(`/bundle/${payload}`, '_blank');
+      } catch (e) {
+        setOpenError(e instanceof Error ? e.message : String(e));
       }
-      const bundle = (await res.json()) as BundleResponse;
-      window.open(`/bundle/${bundle.id}`, '_blank');
-    } catch (e) {
-      setOpenError(e instanceof Error ? e.message : String(e));
-    }
-  }, [orderedPaths, selected]);
+    },
+    [selectedPaths],
+  );
 
   return (
     <div className="flex h-screen flex-col bg-slate-950 text-slate-100">
       <Header
         selectedCount={selected.size}
         totalBytes={totalBytes}
-        onOpenTab={() => void openTab()}
+        onOpenTab={() => void openTab(false)}
+        onOpenPinned={isGitRepo ? () => void openTab(true) : undefined}
         openDisabled={selected.size === 0}
       />
       {openError && (
@@ -130,19 +169,47 @@ export function App() {
               previewPath={previewPath}
               onToggleFile={toggleFile}
               onToggleFiles={toggleFiles}
-              onPreview={setPreviewPath}
+              onPreview={(path) => {
+                setPreviewPath(path);
+                setViewMode('single');
+              }}
             />
           )}
         </aside>
-        <main className="min-w-0 flex-1 bg-slate-950">
-          <FileViewer
-            path={previewPath}
-            comments={comments}
-            onAddComment={(file, startLine, endLine, body) =>
-              addComment({ file, startLine, endLine, body })
-            }
-            onRemoveComment={(id) => void removeComment(id)}
-          />
+        <main className="flex min-w-0 flex-1 flex-col bg-slate-950">
+          <div className="flex items-center gap-1 border-b border-slate-700 bg-slate-900 px-2 py-1">
+            {(
+              [
+                ['single', 'プレビュー'],
+                ['selected', `選択ファイル (${selectedPaths.length})`],
+              ] as const
+            ).map(([mode, label]) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setViewMode(mode)}
+                className={`rounded px-2 py-0.5 text-xs ${
+                  viewMode === mode
+                    ? 'bg-slate-700 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="min-h-0 flex-1">
+            <FileViewer
+              mode={viewMode}
+              previewPath={previewPath}
+              selectedPaths={selectedPaths}
+              comments={comments}
+              onAddComment={(file, startLine, endLine, body) =>
+                addComment({ file, startLine, endLine, body })
+              }
+              onRemoveComment={(id) => void removeComment(id)}
+            />
+          </div>
         </main>
       </div>
     </div>

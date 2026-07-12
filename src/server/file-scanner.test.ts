@@ -4,7 +4,9 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { buildTree, MAX_SELECTABLE_BYTES, scanFiles } from './file-scanner.js';
+import { buildTree } from '../utils/tree.js';
+
+import { MAX_SELECTABLE_BYTES, scanFiles } from './file-scanner.js';
 
 let root: string;
 

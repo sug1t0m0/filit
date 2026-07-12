@@ -2,7 +2,8 @@ import type { Comment } from '@/types/core.js';
 
 interface CommentCardProps {
   comment: Comment;
-  onDelete: (id: string) => void;
+  /** Omit to render read-only (no delete button) */
+  onDelete?: (id: string) => void;
 }
 
 export function CommentCard({ comment, onDelete }: CommentCardProps) {
@@ -18,14 +19,16 @@ export function CommentCard({ comment, onDelete }: CommentCardProps) {
           {range}
         </span>
         <p className="flex-1 whitespace-pre-wrap text-sm text-slate-200">{comment.body}</p>
-        <button
-          type="button"
-          onClick={() => onDelete(comment.id)}
-          title="コメントを削除"
-          className="shrink-0 text-xs text-slate-500 hover:text-red-400"
-        >
-          ✕
-        </button>
+        {onDelete && (
+          <button
+            type="button"
+            onClick={() => onDelete(comment.id)}
+            title="コメントを削除"
+            className="shrink-0 text-xs text-slate-500 hover:text-red-400"
+          >
+            ✕
+          </button>
+        )}
       </div>
     </div>
   );

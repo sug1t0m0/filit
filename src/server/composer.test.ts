@@ -78,6 +78,19 @@ describe('composeMarkdown', () => {
     expect(markdown).toContain('10: line10');
   });
 
+  it('includes a directory tree section after the header', () => {
+    const { markdown } = composeMarkdown(
+      [
+        { path: 'src/a.ts', content: 'a\n' },
+        { path: 'src/deep/b.ts', content: 'b\n' },
+        { path: 'top.md', content: 'c\n' },
+      ],
+      [],
+    );
+    expect(markdown).toContain('src/\n  deep/\n    b.ts\n  a.ts\ntop.md');
+    expect(markdown.indexOf('src/\n')).toBeLessThan(markdown.indexOf('## src/a.ts'));
+  });
+
   it('reports UTF-8 byte size of the whole markdown', () => {
     const result = composeMarkdown([{ path: 'a.ts', content: '注\n' }], []);
     expect(result.bytes).toBe(Buffer.byteLength(result.markdown, 'utf8'));
