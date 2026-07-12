@@ -52,6 +52,9 @@ pnpm dev          # Express API + Vite dev server with HMR
 pnpm test         # vitest
 pnpm run check    # oxlint
 pnpm run build    # dist/
+
+pnpm dev --host 0.0.0.0   # expose the dev server on your LAN (e.g. to test from a phone);
+                          # anyone on the network can then read the scoped files
 ```
 
 ## License
